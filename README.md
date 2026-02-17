@@ -12,17 +12,28 @@ A collection of QGIS plugins and utilities for GIS workflows.
 
 ## Deploying Plugins
 
-Run the deployment script to copy plugins into your local QGIS plugins
-directory:
+Run the deployment script to deploy plugins locally or upload them to the
+official QGIS plugin repository:
 
 ```bash
 python deploy_plugins.py
 ```
 
-The script automatically detects your operating system, locates the QGIS
-profiles directory, scans the `plugins/` folder for valid plugins, and lets
-you choose which ones to install. After deploying, restart QGIS and enable
-the plugin(s) via **Plugins > Manage and Install Plugins**.
+The script presents two options:
+
+1. **Deploy to local QGIS profile** — Copies plugins into your local QGIS
+   plugins directory. Automatically detects your operating system, locates
+   the QGIS profiles directory, and lets you choose which profile and
+   plugins to install. After deploying, restart QGIS and enable the
+   plugin(s) via **Plugins > Manage and Install Plugins**.
+
+2. **Upload to QGIS plugin repository** — Packages plugins as ZIP archives
+   and uploads them to [plugins.qgis.org](https://plugins.qgis.org) for
+   official repository approval. Requires an
+   [OSGeo account](https://www.osgeo.org/community/getting-started-osgeo/).
+   Validates that all required `metadata.txt` fields are populated before
+   uploading. Credentials can be provided interactively or via
+   `OSGEO_USERNAME` and `OSGEO_PASSWORD` environment variables.
 
 ### Supported Platforms
 

@@ -5,14 +5,22 @@ Created by Australis Asset Advisory Group
 
 Scans the repository for QGIS plugin folders (identified by the presence of
 both __init__.py and metadata.txt) and copies them into the local QGIS
-plugins directory.  Supports Windows, Linux, and macOS.  Detects available
-QGIS profiles and lets the user choose which one to deploy to.
+plugins directory or uploads them to the official QGIS plugin repository.
+Supports Windows, Linux, and macOS.  Detects available QGIS profiles and
+lets the user choose which one to deploy to.
 """
 
+import base64
+import getpass
 import os
 import platform
 import shutil
 import sys
+import tempfile
+import urllib.error
+import urllib.request
+import uuid
+import zipfile
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -20,9 +28,27 @@ import sys
 
 REQUIRED_PLUGIN_FILES = ("__init__.py", "metadata.txt")
 
+QGIS_REPO_UPLOAD_URL = "https://plugins.qgis.org/api/v1/plugin/upload/"
+
+UPLOAD_TIMEOUT_SECONDS = 60
+
+# Metadata fields that must be non-empty before uploading to the repository.
+# Names use the original case from metadata.txt for display purposes.
+REQUIRED_METADATA_FOR_UPLOAD = (
+    "name", "description", "version", "qgisMinimumVersion",
+    "author", "about", "email", "homepage", "tracker", "repository",
+)
+
+# Directories and file patterns excluded from the plugin ZIP archive.
+ZIP_EXCLUDE_DIRS = {
+    ".git", "__pycache__", ".idea", ".vscode", "__MACOSX",
+    ".mypy_cache", ".pytest_cache", "node_modules",
+}
+ZIP_EXCLUDE_EXTENSIONS = {".pyc", ".pyo"}
+
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers — discovery and profiles
 # ---------------------------------------------------------------------------
 
 def get_qgis_profiles_root():
@@ -113,6 +139,10 @@ def read_plugin_name(metadata_path):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Helpers — user interaction
+# ---------------------------------------------------------------------------
+
 def prompt_choice(prompt_text, options, allow_all=False):
     """Prompt the user to pick one or more numbered options.
 
@@ -166,6 +196,10 @@ def prompt_choice(prompt_text, options, allow_all=False):
         print("Invalid selection. Enter a number, comma-separated numbers, "
               f"{'A for all, ' if allow_all else ''}or Q to quit.")
 
+
+# ---------------------------------------------------------------------------
+# Helpers — local deployment
+# ---------------------------------------------------------------------------
 
 def copy_plugin(src_path, dest_path):
     """Copy a plugin folder from *src_path* to *dest_path*.
@@ -227,27 +261,317 @@ def copy_plugin(src_path, dest_path):
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Helpers — repository upload
 # ---------------------------------------------------------------------------
 
-def main():
-    """Entry point for the plugin deployment script."""
+def read_metadata_fields(metadata_path):
+    """Parse all key=value pairs from a QGIS metadata.txt file.
+
+    Returns:
+        dict: Mapping of lowercase field names to their values.
+    """
+    fields = {}
+    try:
+        with open(metadata_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("["):
+                    continue
+                if "=" in stripped:
+                    key, _, value = stripped.partition("=")
+                    fields[key.strip().lower()] = value.strip()
+    except OSError:
+        pass
+    return fields
+
+
+def validate_metadata_for_upload(metadata_path):
+    """Check that all required metadata fields are present and non-empty.
+
+    Returns:
+        list[str]: List of validation error messages (empty if all valid).
+    """
+    fields = read_metadata_fields(metadata_path)
+    errors = []
+    for field in REQUIRED_METADATA_FOR_UPLOAD:
+        value = fields.get(field.lower(), "")
+        if not value:
+            errors.append(f"  - '{field}' is missing or empty")
+    return errors
+
+
+def create_plugin_zip(plugin_path, plugin_folder_name):
+    """Package a plugin directory as a ZIP file for repository upload.
+
+    The ZIP contains a single top-level directory matching the plugin folder
+    name.  Build artifacts, hidden directories, and compiled bytecode are
+    excluded.
+
+    Args:
+        plugin_path: Full path to the plugin source directory.
+        plugin_folder_name: Name used as the top-level directory in the ZIP.
+
+    Returns:
+        str: Path to the temporary ZIP file.
+    """
+    tmp_dir = tempfile.mkdtemp(prefix="qgis_plugin_")
+    zip_path = os.path.join(tmp_dir, f"{plugin_folder_name}.zip")
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(plugin_path):
+            # Prune excluded directories in-place.
+            dirs[:] = [
+                d for d in dirs
+                if d not in ZIP_EXCLUDE_DIRS and not d.startswith(".")
+            ]
+            for filename in files:
+                _, ext = os.path.splitext(filename)
+                if ext.lower() in ZIP_EXCLUDE_EXTENSIONS:
+                    continue
+                file_path = os.path.join(root, filename)
+                rel_path = os.path.relpath(
+                    file_path, os.path.dirname(plugin_path),
+                )
+                zf.write(file_path, rel_path)
+
+    return zip_path
+
+
+def load_env_file(repo_root):
+    """Load variables from a ``.env`` file into the process environment.
+
+    Only sets variables that are not already defined so that real environment
+    variables always take precedence.
+
+    Args:
+        repo_root: Repository root directory containing the ``.env`` file.
+    """
+    env_path = os.path.join(repo_root, ".env")
+    if not os.path.isfile(env_path):
+        return
+    try:
+        with open(env_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if "=" not in stripped:
+                    continue
+                key, _, value = stripped.partition("=")
+                key = key.strip()
+                value = value.strip()
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except OSError:
+        pass
+
+
+def get_osgeo_credentials():
+    """Obtain OSGeo credentials from environment variables or user prompt.
+
+    Checks for ``OSGEO_USERNAME`` and ``OSGEO_PASSWORD`` environment
+    variables (including values loaded from a ``.env`` file) first.
+    Falls back to interactive prompts.
+
+    Returns:
+        tuple[str, str] or None: (username, password), or None if aborted.
+    """
+    username = os.environ.get("OSGEO_USERNAME", "")
+    password = os.environ.get("OSGEO_PASSWORD", "")
+
+    if username and password:
+        print(f"\n  Using OSGeo credentials from environment variables "
+              f"(user: {username}).")
+        return username, password
+
+    print("\n  Enter your OSGeo credentials (or press Ctrl+C to cancel).")
+    if username:
+        print(f"  Username from OSGEO_USERNAME: {username}")
+    else:
+        try:
+            username = input("  OSGeo username: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        if not username:
+            print("  Username cannot be empty.")
+            return None
+
+    try:
+        password = getpass.getpass("  OSGeo password: ")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    if not password:
+        print("  Password cannot be empty.")
+        return None
+
+    return username, password
+
+
+def upload_plugin_to_repository(zip_path, username, password):
+    """Upload a plugin ZIP to the official QGIS plugin repository.
+
+    Uses HTTP Basic authentication with the provided OSGeo credentials.
+
+    Args:
+        zip_path: Path to the plugin ZIP file.
+        username: OSGeo username.
+        password: OSGeo password.
+
+    Returns:
+        tuple[bool, str]: (success, message).
+    """
+    filename = os.path.basename(zip_path)
+
+    with open(zip_path, "rb") as fh:
+        zip_data = fh.read()
+
+    # Build multipart/form-data body.
+    boundary = uuid.uuid4().hex
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="package"; '
+        f'filename="{filename}"\r\n'
+        f"Content-Type: application/zip\r\n"
+        f"\r\n"
+    ).encode("utf-8") + zip_data + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+    credentials = base64.b64encode(
+        f"{username}:{password}".encode("utf-8"),
+    ).decode("ascii")
+
+    request = urllib.request.Request(
+        QGIS_REPO_UPLOAD_URL,
+        data=body,
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Authorization": f"Basic {credentials}",
+        },
+        method="POST",
+    )
+
+    try:
+        response = urllib.request.urlopen(
+            request, timeout=UPLOAD_TIMEOUT_SECONDS,
+        )
+        return True, f"HTTP {response.status} — upload accepted."
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = ""
+        return False, f"HTTP {exc.code}: {exc.reason}. {detail}".strip()
+    except urllib.error.URLError as exc:
+        return False, f"Connection error: {exc.reason}"
+    except OSError as exc:
+        return False, f"Network error: {exc}"
+
+
+def upload_flow(plugins, display):
+    """Orchestrate the plugin upload to the QGIS repository.
+
+    Validates metadata, collects credentials, packages each selected plugin
+    as a ZIP, and uploads it to the official QGIS plugin repository.
+
+    Args:
+        plugins: List of (folder_name, folder_path) tuples.
+        display: List of display strings for each plugin.
+    """
+    # --- Select plugins to upload ---
+    selection = prompt_choice(
+        "Select plugins to upload:", display, allow_all=True,
+    )
+    if selection is None:
+        print("Aborted.")
+        return
+
+    # --- Validate metadata ---
+    ready = []
+    for idx in selection:
+        folder_name, folder_path = plugins[idx]
+        meta_path = os.path.join(folder_path, "metadata.txt")
+        errors = validate_metadata_for_upload(meta_path)
+        if errors:
+            print(f"\n  {display[idx]}")
+            print("  Missing required metadata fields:")
+            for err in errors:
+                print(err)
+            print("  Skipping — update metadata.txt before uploading.")
+        else:
+            ready.append(idx)
+
+    if not ready:
+        print("\nNo plugins passed metadata validation.")
+        return
+
+    if len(ready) < len(selection):
+        print(f"\n{len(ready)} of {len(selection)} plugin(s) passed "
+              "metadata validation.")
+
+    # --- Credentials ---
+    creds = get_osgeo_credentials()
+    if creds is None:
+        print("Aborted.")
+        return
+    username, password = creds
+
+    # --- Package and upload ---
+    uploaded = 0
+    for idx in ready:
+        folder_name, folder_path = plugins[idx]
+        print(f"\nPackaging {display[idx]} ...")
+        try:
+            zip_path = create_plugin_zip(folder_path, folder_name)
+        except OSError as exc:
+            print(f"  Error creating ZIP: {exc}")
+            continue
+
+        zip_size = os.path.getsize(zip_path)
+        print(f"  Created {os.path.basename(zip_path)} "
+              f"({zip_size / 1024:.1f} KB)")
+
+        print(f"  Uploading to {QGIS_REPO_UPLOAD_URL} ...")
+        success, message = upload_plugin_to_repository(
+            zip_path, username, password,
+        )
+
+        # Clean up temp file.
+        try:
+            shutil.rmtree(os.path.dirname(zip_path))
+        except OSError:
+            pass
+
+        if success:
+            print(f"  Upload successful: {message}")
+            uploaded += 1
+        else:
+            print(f"  Upload failed: {message}")
+
+    # --- Summary ---
+    print(f"\n{'=' * 60}")
+    print(f"  {uploaded} of {len(ready)} plugin(s) uploaded successfully.")
+    if uploaded > 0:
+        print("  New plugins will be reviewed and approved by the QGIS")
+        print("  plugin approval team (typically within 1-2 business days).")
+        print("  Updates to existing plugins are usually approved daily.")
     print("=" * 60)
-    print("  QGIS Plugin Deployer")
-    print("  Australis Asset Advisory Group")
-    print("=" * 60)
 
-    # Determine repository root (directory containing this script).
-    repo_root = os.path.dirname(os.path.abspath(__file__))
 
-    # --- Discover plugins ---
-    plugins = discover_plugins(repo_root)
-    if not plugins:
-        print("\nNo plugins found in the repository.")
-        print("A valid plugin folder inside plugins/ must contain both "
-              "__init__.py and metadata.txt.")
-        sys.exit(0)
+# ---------------------------------------------------------------------------
+# Helpers — local deployment flow
+# ---------------------------------------------------------------------------
 
+def deploy_local_flow(plugins, display):
+    """Orchestrate local plugin deployment to a QGIS profile.
+
+    Locates the QGIS profiles directory, lets the user select a profile,
+    then copies selected plugins into that profile's plugin folder.
+
+    Args:
+        plugins: List of (folder_name, folder_path) tuples.
+        display: List of display strings for each plugin.
+    """
     # --- Locate QGIS profiles directory ---
     profiles_root = get_qgis_profiles_root()
     if profiles_root is None or not os.path.isdir(profiles_root):
@@ -260,9 +584,9 @@ def main():
                 ).strip().strip('"').strip("'")
             except (EOFError, KeyboardInterrupt):
                 print("\nAborted.")
-                sys.exit(0)
+                return
             if custom.upper() == "Q":
-                sys.exit(0)
+                return
             if os.path.isdir(custom):
                 profiles_root = custom
                 break
@@ -272,7 +596,7 @@ def main():
     profiles = list_profiles(profiles_root)
     if not profiles:
         print(f"\nNo profiles found under {profiles_root}.")
-        sys.exit(1)
+        return
 
     if len(profiles) == 1:
         profile = profiles[0]
@@ -281,7 +605,7 @@ def main():
         selection = prompt_choice("Select a QGIS profile:", profiles)
         if selection is None:
             print("Aborted.")
-            sys.exit(0)
+            return
         profile = profiles[selection[0]]
 
     target_plugins_dir = plugins_dir_for_profile(profiles_root, profile)
@@ -289,18 +613,12 @@ def main():
     print(f"Target directory: {target_plugins_dir}")
 
     # --- Select plugins to deploy ---
-    display = []
-    for folder_name, folder_path in plugins:
-        meta_path = os.path.join(folder_path, "metadata.txt")
-        friendly = read_plugin_name(meta_path) or folder_name
-        display.append(f"{friendly}  ({folder_name}/)")
-
     selection = prompt_choice(
         "Select plugins to deploy:", display, allow_all=True,
     )
     if selection is None:
         print("Aborted.")
-        sys.exit(0)
+        return
 
     # --- Deploy ---
     deployed = 0
@@ -320,6 +638,53 @@ def main():
         print("  Restart QGIS and enable the plugin(s) via")
         print("  Plugins > Manage and Install Plugins.")
     print("=" * 60)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    """Entry point for the plugin deployment script."""
+    print("=" * 60)
+    print("  QGIS Plugin Deployer")
+    print("  Australis Asset Advisory Group")
+    print("=" * 60)
+
+    # Determine repository root (directory containing this script).
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+
+    # Load .env file (credentials, etc.) if present.
+    load_env_file(repo_root)
+
+    # --- Discover plugins ---
+    plugins = discover_plugins(repo_root)
+    if not plugins:
+        print("\nNo plugins found in the repository.")
+        print("A valid plugin folder inside plugins/ must contain both "
+              "__init__.py and metadata.txt.")
+        sys.exit(0)
+
+    # --- Build display names ---
+    display = []
+    for folder_name, folder_path in plugins:
+        meta_path = os.path.join(folder_path, "metadata.txt")
+        friendly = read_plugin_name(meta_path) or folder_name
+        display.append(f"{friendly}  ({folder_name}/)")
+
+    # --- Choose action ---
+    action = prompt_choice("What would you like to do?", [
+        "Deploy to local QGIS profile",
+        "Upload to QGIS plugin repository (plugins.qgis.org)",
+    ])
+    if action is None:
+        print("Aborted.")
+        sys.exit(0)
+
+    if action[0] == 0:
+        deploy_local_flow(plugins, display)
+    else:
+        upload_flow(plugins, display)
 
 
 if __name__ == "__main__":
