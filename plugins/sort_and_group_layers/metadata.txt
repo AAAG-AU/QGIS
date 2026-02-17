@@ -1,0 +1,17 @@
+[general]
+name=Sort and Group Layers
+qgisMinimumVersion=3.0
+description=Sort and group layers by file path, name, date, geometry, feature count, or file size
+version=1.0.0
+author=Australis Asset Advisory Group
+email=
+about=A QGIS plugin that adds "Sort Layers" and "Group Layers" submenus under the Layer menu. Sort layers by full file path, alphabetical name, file modification date, geometry type, feature count, or file size. When layers are already grouped, sorting operates within each group and also reorders the groups. Group layers automatically by geometry type or source folder path. Save and restore the original layer order. Created by Australis Asset Advisory Group.
+tracker=
+repository=
+tags=layers,sorting,order,geometry,features,grouping
+homepage=
+category=Plugins
+icon=
+experimental=False
+deprecated=False
+changelog=1.0.0 - Initial release with sort and group functionality
