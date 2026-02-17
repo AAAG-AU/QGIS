@@ -29,6 +29,7 @@ from qgis.core import (
     QgsLayerTreeGroup,
     QgsLayerTreeLayer,
     QgsProject,
+    QgsProviderRegistry,
     QgsRasterLayer,
     QgsVectorLayer,
     QgsWkbTypes,
@@ -76,7 +77,8 @@ class SortAndGroupLayersPlugin:
         self.sort_menu_action = None
         self.group_menu_action = None
         self.actions = []
-        self.original_order_clones = None
+        self.original_order_nodes = None
+        self._saved_layers = None
 
     # ------------------------------------------------------------------
     # Plugin lifecycle
@@ -192,7 +194,8 @@ class SortAndGroupLayersPlugin:
         self.sort_menu_action = None
         self.group_menu_action = None
         self.actions.clear()
-        self.original_order_clones = None
+        self.original_order_nodes = None
+        self._saved_layers = None
 
         try:
             QgsProject.instance().cleared.disconnect(self._clear_saved_order)
@@ -221,17 +224,68 @@ class SortAndGroupLayersPlugin:
     # ------------------------------------------------------------------
 
     def _save_original_order(self):
-        """Save the current layer tree order (once, before the first sort/group)."""
-        if self.original_order_clones is not None:
+        """Save the current layer tree order (once, before the first sort/group).
+
+        Stores both tree node copies (using direct layer references) and
+        a dict of all QgsMapLayer objects to prevent garbage collection.
+        """
+        if self.original_order_nodes is not None:
             return
         root = QgsProject.instance().layerTreeRoot()
-        self.original_order_clones = [
-            child.clone() for child in root.children()
+        self.original_order_nodes = [
+            self._copy_node(child) for child in root.children()
         ]
+        self._saved_layers = dict(QgsProject.instance().mapLayers())
 
     def _clear_saved_order(self):
         """Clear the saved original order (called when the project changes)."""
-        self.original_order_clones = None
+        self.original_order_nodes = None
+        self._saved_layers = None
+
+    # ------------------------------------------------------------------
+    # Tree node copy helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_layer_node(original):
+        """Create a new QgsLayerTreeLayer with a direct QgsMapLayer reference.
+
+        Using the QgsLayerTreeLayer(QgsMapLayer) constructor keeps a live
+        reference to the layer object, which is more robust than clone()
+        that only stores the layer ID string.
+        """
+        layer = original.layer()
+        if layer is None:
+            return original.clone()
+        node = QgsLayerTreeLayer(layer)
+        node.setItemVisibilityChecked(original.itemVisibilityChecked())
+        node.setExpanded(original.isExpanded())
+        return node
+
+    @staticmethod
+    def _copy_node(node):
+        """Recursively copy a tree node, using direct layer references.
+
+        For QgsLayerTreeLayer nodes, creates a new node via the
+        QgsLayerTreeLayer(QgsMapLayer) constructor so the layer
+        reference is maintained directly rather than by ID lookup.
+        For QgsLayerTreeGroup nodes, rebuilds the group and copies
+        all children recursively.
+        """
+        if isinstance(node, QgsLayerTreeLayer):
+            return SortAndGroupLayersPlugin._make_layer_node(node)
+        if isinstance(node, QgsLayerTreeGroup):
+            group = QgsLayerTreeGroup(node.name())
+            group.setItemVisibilityChecked(node.itemVisibilityChecked())
+            group.setExpanded(node.isExpanded())
+            if node.isMutuallyExclusive():
+                group.setIsMutuallyExclusive(True)
+            for child in node.children():
+                group.addChildNode(
+                    SortAndGroupLayersPlugin._copy_node(child)
+                )
+            return group
+        return node.clone()
 
     # ------------------------------------------------------------------
     # Tree manipulation helpers
@@ -254,19 +308,47 @@ class SortAndGroupLayersPlugin:
     def _rebuild_tree(root, new_children):
         """Replace all children of *root* with *new_children*.
 
-        Temporarily disables the layer-tree-registry bridge so that
-        removing tree nodes does not de-register map layers from the
-        project.
+        Uses a safe two-phase approach:
+          Phase 1 -- Append all new children to the tree (originals
+                     are still present, so every layer keeps at least
+                     one tree-node reference at all times).
+          Phase 2 -- Remove the original children with the
+                     layer-tree-registry bridge disabled, then re-add
+                     any layers that were inadvertently de-registered.
         """
         project = QgsProject.instance()
         bridge = project.layerTreeRegistryBridge()
+
+        # Keep Python references to every registered layer so that even
+        # if they are briefly removed from the registry, the C++ objects
+        # stay alive and can be re-registered.
+        saved_layers = dict(project.mapLayers())
+
+        original_count = len(root.children())
+
+        # Phase 1: append new children at the end of the tree.
+        # No nodes are removed yet, so every layer still has its
+        # original tree node and the bridge has nothing to react to.
+        for child in new_children:
+            root.addChildNode(child)
+
+        # Phase 2: remove the *original* children (they are the first
+        # ``original_count`` items, since new children were appended).
         bridge.setEnabled(False)
         try:
-            root.removeAllChildren()
-            for child in new_children:
-                root.addChildNode(child)
+            for _ in range(original_count):
+                root.removeChildNode(root.children()[0])
+
+            # Safety net: re-register any layers that were lost.
+            for lid, layer in saved_layers.items():
+                if project.mapLayer(lid) is None:
+                    project.addMapLayer(layer, False)
         finally:
             bridge.setEnabled(True)
+
+        # Resolve layer references on all (new) tree nodes so that
+        # node.layer() returns the correct QgsMapLayer object.
+        root.resolveReferences(project)
 
     # ------------------------------------------------------------------
     # Sorting engine
@@ -298,7 +380,7 @@ class SortAndGroupLayersPlugin:
             new_nodes = self._sort_with_groups(children, key_func, reverse)
         else:
             new_nodes = [
-                child.clone()
+                self._copy_node(child)
                 for child in sorted(
                     children, key=key_func, reverse=reverse,
                 )
@@ -309,7 +391,7 @@ class SortAndGroupLayersPlugin:
     def _sort_with_groups(self, children, key_func, reverse):
         """Sort within each group and sort the top-level items.
 
-        Returns a list of cloned / rebuilt top-level nodes in sorted order.
+        Returns a list of new top-level nodes in sorted order.
         """
         keyed_nodes = []
 
@@ -319,28 +401,95 @@ class SortAndGroupLayersPlugin:
                 sorted_kids = sorted(
                     child.children(), key=key_func, reverse=reverse,
                 )
-                sorted_kid_clones = [kid.clone() for kid in sorted_kids]
 
-                # Clone the group itself to preserve all properties
-                # (visibility, expanded state, mutually-exclusive flag, etc.)
-                # then replace its children with the sorted clones.
-                group_clone = child.clone()
-                group_clone.removeAllChildren()
-                for kid_clone in sorted_kid_clones:
-                    group_clone.addChildNode(kid_clone)
+                # Build a new group with copies in sorted order.
+                new_group = QgsLayerTreeGroup(child.name())
+                new_group.setItemVisibilityChecked(
+                    child.itemVisibilityChecked()
+                )
+                new_group.setExpanded(child.isExpanded())
+                if child.isMutuallyExclusive():
+                    new_group.setIsMutuallyExclusive(True)
+                for kid in sorted_kids:
+                    new_group.addChildNode(self._copy_node(kid))
 
-                # Group sort key: derived from its first child after sorting.
+                # Group sort key: derived from its first child.
                 if sorted_kids:
                     group_key = key_func(sorted_kids[0])
                 else:
                     group_key = key_func(child)
 
-                keyed_nodes.append((group_key, group_clone))
+                keyed_nodes.append((group_key, new_group))
             else:
-                keyed_nodes.append((key_func(child), child.clone()))
+                keyed_nodes.append(
+                    (key_func(child), self._copy_node(child))
+                )
 
         keyed_nodes.sort(key=lambda x: x[0], reverse=reverse)
         return [node for _, node in keyed_nodes]
+
+    # ------------------------------------------------------------------
+    # File path extraction
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_file_path(layer):
+        """Extract the on-disk file path from a layer's data source.
+
+        Uses QgsProviderRegistry.decodeUri() for robust extraction that
+        handles GeoPackage, SpatiaLite, shapefiles, file geodatabases,
+        and other provider-specific source strings.
+
+        Different providers store the file path under different keys:
+          - ogr, gdal, delimitedtext, virtual: 'path'
+          - spatialite: 'dbname'
+
+        Returns:
+            The file path string, or empty string if the source is not
+            file-based (e.g. WMS, PostGIS, memory layers).
+        """
+        # --- Attempt 1: decodeUri (most reliable) ---
+        try:
+            uri_parts = QgsProviderRegistry.instance().decodeUri(
+                layer.providerType(), layer.source()
+            )
+            # Check every key that providers commonly use for file paths.
+            for key in ("path", "dbname", "filename", "url"):
+                val = uri_parts.get(key) or ""
+                if not val:
+                    continue
+                # Strip file:// prefix if present (delimitedtext provider).
+                if val.startswith("file://"):
+                    val = val[7:]
+                    # On Windows file:// URLs may look like file:///C:/...
+                    if len(val) > 2 and val[0] == "/" and val[2] == ":":
+                        val = val[1:]
+                # Ignore pure URLs (WMS/WFS).
+                if val.startswith(("http://", "https://")):
+                    continue
+                if val:
+                    return val
+        except Exception:
+            pass
+
+        # --- Attempt 2: parse the raw source string ---
+        source = layer.source()
+
+        # GeoPackage / OGR style: "path|layername=..."
+        candidate = source.split("|")[0].strip()
+        if candidate and not candidate.startswith(("http://", "https://")):
+            return candidate
+
+        # SpatiaLite style: "dbname='path' table=..."
+        if "dbname=" in source:
+            start = source.find("dbname=")
+            rest = source[start + 7:].strip()
+            if rest.startswith("'"):
+                end = rest.find("'", 1)
+                if end > 0:
+                    return rest[1:end]
+
+        return ""
 
     # ------------------------------------------------------------------
     # Sort key helpers
@@ -348,9 +497,11 @@ class SortAndGroupLayersPlugin:
 
     @staticmethod
     def _key_file_path(node):
-        """Full source path, lower-cased."""
+        """File path, lower-cased.  Falls back to source URI for
+        non-file layers so they still sort consistently."""
         if isinstance(node, QgsLayerTreeLayer) and node.layer():
-            return node.layer().source().lower()
+            fp = SortAndGroupLayersPlugin._get_file_path(node.layer())
+            return (fp or node.layer().source()).lower()
         if isinstance(node, QgsLayerTreeGroup):
             return node.name().lower()
         return ""
@@ -372,8 +523,8 @@ class SortAndGroupLayersPlugin:
         return 0.0 so they sort to the end in descending mode.
         """
         if isinstance(node, QgsLayerTreeLayer) and node.layer():
-            file_path = node.layer().source().split("|")[0]
-            if os.path.isfile(file_path):
+            file_path = cls._get_file_path(node.layer())
+            if file_path and os.path.isfile(file_path):
                 try:
                     return os.path.getmtime(file_path)
                 except OSError:
@@ -422,8 +573,8 @@ class SortAndGroupLayersPlugin:
         descending mode.
         """
         if isinstance(node, QgsLayerTreeLayer) and node.layer():
-            file_path = node.layer().source().split("|")[0]
-            if os.path.isfile(file_path):
+            file_path = cls._get_file_path(node.layer())
+            if file_path and os.path.isfile(file_path):
                 try:
                     return os.path.getsize(file_path)
                 except OSError:
@@ -500,7 +651,7 @@ class SortAndGroupLayersPlugin:
         for (order, name) in sorted(categories):
             group = QgsLayerTreeGroup(name)
             for node in categories[(order, name)]:
-                group.addChildNode(node.clone())
+                group.addChildNode(self._copy_node(node))
             new_children.append(group)
 
         self._rebuild_tree(root, new_children)
@@ -508,9 +659,11 @@ class SortAndGroupLayersPlugin:
     def group_by_folder(self):
         """Group all layers by their source folder path.
 
-        Creates one group per unique directory.  Layers whose source is
-        not a local file (WMS, PostGIS, memory, etc.) are placed in an
-        "Other Sources" group.  Existing groups are flattened first.
+        Creates one group per unique directory.  Layers within each
+        group are sorted by filename.  Layers whose source cannot be
+        resolved to a folder (WMS, PostGIS, memory, etc.) are placed
+        in an "Other Sources" group.  Existing groups are flattened
+        first.
         """
         root = QgsProject.instance().layerTreeRoot()
         all_layers = self._flatten_layer_nodes(root)
@@ -520,7 +673,7 @@ class SortAndGroupLayersPlugin:
         self._save_original_order()
 
         # Categorise by source folder.
-        folders = {}   # {folder_path: [nodes]}
+        folders = {}   # {folder_path: [(sort_key, node)]}
         other = []
 
         for node in all_layers:
@@ -528,10 +681,15 @@ class SortAndGroupLayersPlugin:
             if layer is None:
                 other.append(node)
                 continue
-            source = layer.source().split("|")[0]
-            if os.path.isfile(source):
-                folder = os.path.dirname(source)
-                folders.setdefault(folder, []).append(node)
+            file_path = self._get_file_path(layer)
+            # Accept any path that has a directory component.  We do
+            # NOT require os.path.isfile() because the path may use a
+            # provider-specific format that Python cannot stat, yet it
+            # still represents a valid on-disk location.
+            if file_path and os.path.dirname(file_path):
+                folder = os.path.dirname(file_path)
+                filename = os.path.basename(file_path).lower()
+                folders.setdefault(folder, []).append((filename, node))
             else:
                 other.append(node)
 
@@ -539,19 +697,22 @@ class SortAndGroupLayersPlugin:
         display_names = self._unique_folder_names(list(folders.keys()))
 
         # Build the new tree, sorted alphabetically by display name.
+        # Within each group, layers are sorted by filename.
         new_children = []
         for folder_path in sorted(
             folders, key=lambda fp: display_names[fp].lower(),
         ):
             group = QgsLayerTreeGroup(display_names[folder_path])
-            for node in folders[folder_path]:
-                group.addChildNode(node.clone())
+            for _filename, node in sorted(
+                folders[folder_path], key=lambda x: x[0],
+            ):
+                group.addChildNode(self._copy_node(node))
             new_children.append(group)
 
         if other:
             group = QgsLayerTreeGroup("Other Sources")
             for node in other:
-                group.addChildNode(node.clone())
+                group.addChildNode(self._copy_node(node))
             new_children.append(group)
 
         self._rebuild_tree(root, new_children)
@@ -605,7 +766,7 @@ class SortAndGroupLayersPlugin:
 
     def restore_original_order(self):
         """Restore the layer order saved before the first sort or group."""
-        if self.original_order_clones is None:
+        if self.original_order_nodes is None:
             QMessageBox.information(
                 self.iface.mainWindow(),
                 "Sort and Group Layers",
@@ -614,11 +775,19 @@ class SortAndGroupLayersPlugin:
             )
             return
 
-        root = QgsProject.instance().layerTreeRoot()
+        project = QgsProject.instance()
+        root = project.layerTreeRoot()
 
-        # Clone the saved nodes so the snapshot remains usable.
-        clones = [node.clone() for node in self.original_order_clones]
-        self._rebuild_tree(root, clones)
+        # Re-register any layers that were lost since the snapshot.
+        if self._saved_layers:
+            for lid, layer in self._saved_layers.items():
+                if project.mapLayer(lid) is None:
+                    project.addMapLayer(layer, False)
+
+        # Copy the saved nodes (so the snapshot can be used again).
+        copies = [self._copy_node(node) for node in self.original_order_nodes]
+        self._rebuild_tree(root, copies)
 
         # Clear saved order after a successful restore.
-        self.original_order_clones = None
+        self.original_order_nodes = None
+        self._saved_layers = None

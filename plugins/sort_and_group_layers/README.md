@@ -69,6 +69,14 @@ submenus appear at the bottom:
 1. **Sort Layers** -- sorting options and restore
 2. **Group Layers** -- grouping options and restore
 
+## Version History
+
+| Version | Changes |
+|---|---|
+| **1.0.2** | Fixed Group by Folder Path not detecting file paths from SpatiaLite, delimited text, and other provider source URIs; added fallback raw source string parsing |
+| **1.0.1** | Fixed sort and group operations removing layers from the Layers panel; fixed Restore Original Order dropping layer connections and symbology |
+| **1.0.0** | Initial release with sort and group functionality |
+
 ## Notes
 
 - Only top-level nodes are sorted; contents within nested sub-groups are
