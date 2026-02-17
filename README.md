@@ -8,7 +8,7 @@ A collection of QGIS plugins and utilities for GIS workflows.
 
 | Plugin | Description |
 |---|---|
-| [sort_layers](sort_layers/) | Sort layers in the Layers panel by file path, name, file date, geometry type, feature count, or file size |
+| [Sort and Group Layers](plugins/sort_and_group_layers/) | Sort and group layers in the Layers panel by file path, name, file date, geometry type, feature count, file size, or source folder |
 
 ## Deploying Plugins
 
@@ -20,9 +20,9 @@ python deploy_plugins.py
 ```
 
 The script automatically detects your operating system, locates the QGIS
-profiles directory, and lets you choose which plugins to install. After
-deploying, restart QGIS and enable the plugin(s) via **Plugins > Manage and
-Install Plugins**.
+profiles directory, scans the `plugins/` folder for valid plugins, and lets
+you choose which ones to install. After deploying, restart QGIS and enable
+the plugin(s) via **Plugins > Manage and Install Plugins**.
 
 ### Supported Platforms
 
@@ -38,13 +38,14 @@ Install Plugins**.
 ## Repository Structure
 
 ```
-├── deploy_plugins.py          # Plugin deployment script
-├── sort_layers/               # Sort Layers plugin
-│   ├── __init__.py
-│   ├── sort_layers.py
-│   ├── metadata.txt
-│   └── README.md
-└── .claude/                   # Claude Code configuration
+├── deploy_plugins.py                       # Plugin deployment script
+├── plugins/                                # All QGIS plugins
+│   └── sort_and_group_layers/              # Sort and Group Layers plugin
+│       ├── __init__.py
+│       ├── sort_and_group_layers.py
+│       ├── metadata.txt
+│       └── README.md
+└── .claude/                                # Claude Code configuration
     ├── CLAUDE.md
     ├── codebase-knowledge.md
     └── project-skills/

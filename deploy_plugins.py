@@ -71,20 +71,23 @@ def plugins_dir_for_profile(profiles_root, profile_name):
 
 
 def discover_plugins(repo_root):
-    """Scan *repo_root* for QGIS plugin folders.
+    """Scan *repo_root*/plugins/ for QGIS plugin folders.
 
-    A folder is considered a plugin if it contains both ``__init__.py`` and
-    ``metadata.txt`` at its top level.
+    Plugins are expected to live under a ``plugins/`` directory at the
+    repository root.  A subfolder is considered a plugin if it contains
+    both ``__init__.py`` and ``metadata.txt`` at its top level.
 
     Returns:
         list[tuple[str, str]]: (plugin_folder_name, full_path) pairs.
     """
+    plugins_dir = os.path.join(repo_root, "plugins")
+    if not os.path.isdir(plugins_dir):
+        return []
     plugins = []
-    for entry in sorted(os.listdir(repo_root)):
-        entry_path = os.path.join(repo_root, entry)
+    for entry in sorted(os.listdir(plugins_dir)):
+        entry_path = os.path.join(plugins_dir, entry)
         if not os.path.isdir(entry_path):
             continue
-        # Skip hidden / config directories.
         if entry.startswith("."):
             continue
         if all(
@@ -241,8 +244,8 @@ def main():
     plugins = discover_plugins(repo_root)
     if not plugins:
         print("\nNo plugins found in the repository.")
-        print("A valid plugin folder must contain both __init__.py and "
-              "metadata.txt.")
+        print("A valid plugin folder inside plugins/ must contain both "
+              "__init__.py and metadata.txt.")
         sys.exit(0)
 
     # --- Locate QGIS profiles directory ---
