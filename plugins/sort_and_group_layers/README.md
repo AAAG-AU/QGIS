@@ -38,7 +38,7 @@ folder.
 
 ## Requirements
 
-- QGIS 3.0 or later
+- QGIS 3.0 or later (including QGIS 4.x with Qt6/PyQt6)
 
 ## Installation
 

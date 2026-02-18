@@ -24,8 +24,15 @@ Script created by Australis Asset Advisory Group.
 
 import os
 
-from qgis.PyQt.QtWidgets import QAction, QMenu, QMessageBox
+# QGIS 4 / Qt6 compatibility: QAction moved from QtWidgets to QtGui.
+try:
+    from qgis.PyQt.QtGui import QAction
+except ImportError:
+    from qgis.PyQt.QtWidgets import QAction
+
+from qgis.PyQt.QtWidgets import QMenu, QMessageBox
 from qgis.core import (
+    Qgis,
     QgsLayerTreeGroup,
     QgsLayerTreeLayer,
     QgsProject,
@@ -36,21 +43,38 @@ from qgis.core import (
 )
 
 
+# Geometry type constants compatible with both QGIS 3.x and 4.x.
+# Qgis.GeometryType was introduced in QGIS 3.30; QGIS 4.x removes the
+# deprecated QgsWkbTypes.*Geometry aliases.
+try:
+    _GEOM_POINT = Qgis.GeometryType.Point
+    _GEOM_LINE = Qgis.GeometryType.Line
+    _GEOM_POLYGON = Qgis.GeometryType.Polygon
+    _GEOM_NULL = Qgis.GeometryType.Null
+    _GEOM_UNKNOWN = Qgis.GeometryType.Unknown
+except AttributeError:
+    _GEOM_POINT = QgsWkbTypes.PointGeometry
+    _GEOM_LINE = QgsWkbTypes.LineGeometry
+    _GEOM_POLYGON = QgsWkbTypes.PolygonGeometry
+    _GEOM_NULL = QgsWkbTypes.NullGeometry
+    _GEOM_UNKNOWN = QgsWkbTypes.UnknownGeometry
+
+
 # Geometry type display order and human-readable names.
 _GEOMETRY_SORT_ORDER = {
-    QgsWkbTypes.PointGeometry: 0,
-    QgsWkbTypes.LineGeometry: 1,
-    QgsWkbTypes.PolygonGeometry: 2,
-    QgsWkbTypes.NullGeometry: 3,
-    QgsWkbTypes.UnknownGeometry: 4,
+    _GEOM_POINT: 0,
+    _GEOM_LINE: 1,
+    _GEOM_POLYGON: 2,
+    _GEOM_NULL: 3,
+    _GEOM_UNKNOWN: 4,
 }
 
 _GEOMETRY_GROUP_NAMES = {
-    QgsWkbTypes.PointGeometry: "Point Layers",
-    QgsWkbTypes.LineGeometry: "Line Layers",
-    QgsWkbTypes.PolygonGeometry: "Polygon Layers",
-    QgsWkbTypes.NullGeometry: "No Geometry",
-    QgsWkbTypes.UnknownGeometry: "Unknown Geometry",
+    _GEOM_POINT: "Point Layers",
+    _GEOM_LINE: "Line Layers",
+    _GEOM_POLYGON: "Polygon Layers",
+    _GEOM_NULL: "No Geometry",
+    _GEOM_UNKNOWN: "Unknown Geometry",
 }
 
 
