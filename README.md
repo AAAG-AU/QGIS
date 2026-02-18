@@ -19,7 +19,7 @@ official QGIS plugin repository:
 python deploy_plugins.py
 ```
 
-The script presents two options:
+The script presents three options:
 
 1. **Deploy to local QGIS profile** — Copies plugins into your local QGIS
    plugins directory. Automatically detects your operating system, locates
@@ -28,12 +28,20 @@ The script presents two options:
    plugin(s) via **Plugins > Manage and Install Plugins**.
 
 2. **Upload to QGIS plugin repository** — Packages plugins as ZIP archives
-   and uploads them to [plugins.qgis.org](https://plugins.qgis.org) for
-   official repository approval. Requires an
+   and uploads them to [plugins.qgis.org](https://plugins.qgis.org) via the
+   REST API. Only works for plugins that have already been registered on the
+   repository (see option 3 for new plugins). Requires an
    [OSGeo account](https://www.osgeo.org/community/getting-started-osgeo/).
    Validates that all required `metadata.txt` fields are populated before
    uploading. Credentials can be provided interactively or via
    `OSGEO_USERNAME` and `OSGEO_PASSWORD` environment variables.
+
+3. **Prepare ZIP for first-time upload** — Creates a ready-to-upload ZIP
+   file in the `dist/` folder at the repository root. New plugins must be
+   uploaded manually through the web interface at
+   [plugins.qgis.org/plugins/add/](https://plugins.qgis.org/plugins/add/)
+   because the API returns 403 Forbidden for unregistered plugins. Once
+   approved, future updates can use option 2.
 
 ### Supported Platforms
 
@@ -43,7 +51,7 @@ The script presents two options:
 
 ## Requirements
 
-- QGIS 3.0 or later
+- QGIS 3.0 or later (including QGIS 4.x with Qt6/PyQt6)
 - Python 3 (bundled with QGIS)
 
 ## Repository Structure

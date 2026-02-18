@@ -468,6 +468,155 @@ def upload_plugin_to_repository(zip_path, username, password):
         return False, f"Network error: {exc}"
 
 
+def prepare_upload_flow(plugins, display, repo_root):
+    """Prepare plugin ZIP files for first-time manual upload.
+
+    Validates metadata, packages each selected plugin as a ZIP, and saves
+    it to a ``dist/`` folder at the repository root.  The user can then
+    upload the ZIP manually via https://plugins.qgis.org/plugins/add/.
+
+    Args:
+        plugins: List of (folder_name, folder_path) tuples.
+        display: List of display strings for each plugin.
+        repo_root: Repository root directory.
+    """
+    print("\n  First-time uploads must be done manually through the web")
+    print("  interface.  This will create a ready-to-upload ZIP file in")
+    print("  the dist/ folder at the repository root.")
+    print("  Upload it at: https://plugins.qgis.org/plugins/add/")
+
+    # --- Select plugins ---
+    selection = prompt_choice(
+        "Select plugins to prepare:", display, allow_all=True,
+    )
+    if selection is None:
+        print("Aborted.")
+        return
+
+    # --- Validate metadata ---
+    ready = []
+    for idx in selection:
+        folder_name, folder_path = plugins[idx]
+        meta_path = os.path.join(folder_path, "metadata.txt")
+        errors = validate_metadata_for_upload(meta_path)
+        if errors:
+            print(f"\n  {display[idx]}")
+            print("  Missing required metadata fields:")
+            for err in errors:
+                print(err)
+            print("  Skipping — update metadata.txt before uploading.")
+        else:
+            ready.append(idx)
+
+    if not ready:
+        print("\nNo plugins passed metadata validation.")
+        return
+
+    if len(ready) < len(selection):
+        print(f"\n{len(ready)} of {len(selection)} plugin(s) passed "
+              "metadata validation.")
+
+    # --- Create dist/ folder ---
+    dist_dir = os.path.join(repo_root, "dist")
+    os.makedirs(dist_dir, exist_ok=True)
+
+    # --- Package ---
+    prepared = 0
+    for idx in ready:
+        folder_name, folder_path = plugins[idx]
+        print(f"\nPackaging {display[idx]} ...")
+        try:
+            tmp_zip = create_plugin_zip(folder_path, folder_name)
+        except OSError as exc:
+            print(f"  Error creating ZIP: {exc}")
+            continue
+
+        dest_zip = os.path.join(dist_dir, f"{folder_name}.zip")
+
+        # Handle existing ZIP with overwrite prompt and file-lock retry.
+        if os.path.isfile(dest_zip):
+            overwrite = False
+            while True:
+                try:
+                    answer = input(
+                        f"  {os.path.basename(dest_zip)} already exists in "
+                        "dist/. Overwrite? (y/n): "
+                    ).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+                if answer in ("y", "yes"):
+                    overwrite = True
+                    break
+                if answer in ("n", "no"):
+                    print(f"  Skipped {folder_name}.")
+                    break
+                print("  Please enter y or n.")
+
+            if not overwrite:
+                try:
+                    shutil.rmtree(os.path.dirname(tmp_zip))
+                except OSError:
+                    pass
+                continue
+
+            while True:
+                try:
+                    os.remove(dest_zip)
+                    break
+                except PermissionError:
+                    print(f"\n  Cannot overwrite {dest_zip} — file may be "
+                          "locked.")
+                    try:
+                        input("  Close any programs using it, then press "
+                              "Enter to retry (or Ctrl+C to skip): ")
+                    except (EOFError, KeyboardInterrupt):
+                        print(f"\n  Skipped {folder_name}.")
+                        break
+                except OSError as exc:
+                    print(f"  Error removing existing ZIP: {exc}")
+                    break
+
+            if os.path.isfile(dest_zip):
+                try:
+                    shutil.rmtree(os.path.dirname(tmp_zip))
+                except OSError:
+                    pass
+                continue
+
+        # Move ZIP from temp to dist/.
+        try:
+            shutil.move(tmp_zip, dest_zip)
+        except OSError as exc:
+            print(f"  Error moving ZIP to dist/: {exc}")
+            try:
+                shutil.rmtree(os.path.dirname(tmp_zip))
+            except OSError:
+                pass
+            continue
+
+        # Clean up temp directory.
+        try:
+            shutil.rmtree(os.path.dirname(tmp_zip))
+        except OSError:
+            pass
+
+        zip_size = os.path.getsize(dest_zip)
+        print(f"  Created dist/{os.path.basename(dest_zip)} "
+              f"({zip_size / 1024:.1f} KB)")
+        prepared += 1
+
+    # --- Summary ---
+    print(f"\n{'=' * 60}")
+    print(f"  {prepared} of {len(ready)} plugin(s) prepared in dist/")
+    if prepared > 0:
+        print(f"\n  Upload your ZIP file(s) manually at:")
+        print(f"  https://plugins.qgis.org/plugins/add/")
+        print(f"\n  Once approved, future updates can be uploaded via")
+        print(f"  the 'Upload to QGIS plugin repository' option.")
+    print("=" * 60)
+
+
 def upload_flow(plugins, display):
     """Orchestrate the plugin upload to the QGIS repository.
 
@@ -676,6 +825,7 @@ def main():
     action = prompt_choice("What would you like to do?", [
         "Deploy to local QGIS profile",
         "Upload to QGIS plugin repository (plugins.qgis.org)",
+        "Prepare ZIP for first-time upload (new plugin)",
     ])
     if action is None:
         print("Aborted.")
@@ -683,8 +833,10 @@ def main():
 
     if action[0] == 0:
         deploy_local_flow(plugins, display)
-    else:
+    elif action[0] == 1:
         upload_flow(plugins, display)
+    else:
+        prepare_upload_flow(plugins, display, repo_root)
 
 
 if __name__ == "__main__":
