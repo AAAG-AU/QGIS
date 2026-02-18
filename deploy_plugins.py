@@ -46,6 +46,9 @@ ZIP_EXCLUDE_DIRS = {
 }
 ZIP_EXCLUDE_EXTENSIONS = {".pyc", ".pyo"}
 
+# Filenames recognised as a LICENSE file (case-insensitive check).
+LICENSE_FILENAMES = {"license", "license.txt", "licence", "licence.txt"}
+
 
 # ---------------------------------------------------------------------------
 # Helpers — discovery and profiles
@@ -300,22 +303,44 @@ def validate_metadata_for_upload(metadata_path):
     return errors
 
 
-def create_plugin_zip(plugin_path, plugin_folder_name):
+def _find_license_in_dir(directory):
+    """Return the path to a LICENSE file in *directory*, or None."""
+    try:
+        for entry in os.listdir(directory):
+            if entry.lower() in LICENSE_FILENAMES:
+                candidate = os.path.join(directory, entry)
+                if os.path.isfile(candidate):
+                    return candidate
+    except OSError:
+        pass
+    return None
+
+
+def create_plugin_zip(plugin_path, plugin_folder_name,
+                      default_license=None):
     """Package a plugin directory as a ZIP file for repository upload.
 
     The ZIP contains a single top-level directory matching the plugin folder
     name.  Build artifacts, hidden directories, and compiled bytecode are
     excluded.
 
+    If the plugin directory does not contain a LICENSE file and
+    *default_license* is provided (path to a fallback LICENSE file), the
+    fallback is automatically included in the ZIP as ``LICENSE``.
+
     Args:
         plugin_path: Full path to the plugin source directory.
         plugin_folder_name: Name used as the top-level directory in the ZIP.
+        default_license: Optional path to a default LICENSE file to include
+            when the plugin does not have its own.
 
     Returns:
         str: Path to the temporary ZIP file.
     """
     tmp_dir = tempfile.mkdtemp(prefix="qgis_plugin_")
     zip_path = os.path.join(tmp_dir, f"{plugin_folder_name}.zip")
+
+    has_license = False
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, dirs, files in os.walk(plugin_path):
@@ -333,6 +358,18 @@ def create_plugin_zip(plugin_path, plugin_folder_name):
                     file_path, os.path.dirname(plugin_path),
                 )
                 zf.write(file_path, rel_path)
+                # Track whether a LICENSE file was included.
+                if (root == plugin_path
+                        and filename.lower() in LICENSE_FILENAMES):
+                    has_license = True
+
+        # Inject default LICENSE if the plugin does not have one.
+        if not has_license and default_license:
+            if os.path.isfile(default_license):
+                license_rel = os.path.join(plugin_folder_name, "LICENSE")
+                zf.write(default_license, license_rel)
+                print(f"  LICENSE not found in plugin — added default "
+                      f"from {default_license}")
 
     return zip_path
 
@@ -516,6 +553,9 @@ def prepare_upload_flow(plugins, display, repo_root):
         print(f"\n{len(ready)} of {len(selection)} plugin(s) passed "
               "metadata validation.")
 
+    # --- Locate default LICENSE ---
+    default_license = _find_license_in_dir(repo_root)
+
     # --- Create dist/ folder ---
     dist_dir = os.path.join(repo_root, "dist")
     os.makedirs(dist_dir, exist_ok=True)
@@ -526,7 +566,10 @@ def prepare_upload_flow(plugins, display, repo_root):
         folder_name, folder_path = plugins[idx]
         print(f"\nPackaging {display[idx]} ...")
         try:
-            tmp_zip = create_plugin_zip(folder_path, folder_name)
+            tmp_zip = create_plugin_zip(
+                folder_path, folder_name,
+                default_license=default_license,
+            )
         except OSError as exc:
             print(f"  Error creating ZIP: {exc}")
             continue
@@ -617,7 +660,7 @@ def prepare_upload_flow(plugins, display, repo_root):
     print("=" * 60)
 
 
-def upload_flow(plugins, display):
+def upload_flow(plugins, display, repo_root):
     """Orchestrate the plugin upload to the QGIS repository.
 
     Validates metadata, collects credentials, packages each selected plugin
@@ -626,6 +669,7 @@ def upload_flow(plugins, display):
     Args:
         plugins: List of (folder_name, folder_path) tuples.
         display: List of display strings for each plugin.
+        repo_root: Repository root directory.
     """
     # --- Select plugins to upload ---
     selection = prompt_choice(
@@ -665,13 +709,19 @@ def upload_flow(plugins, display):
         return
     username, password = creds
 
+    # --- Locate default LICENSE ---
+    default_license = _find_license_in_dir(repo_root)
+
     # --- Package and upload ---
     uploaded = 0
     for idx in ready:
         folder_name, folder_path = plugins[idx]
         print(f"\nPackaging {display[idx]} ...")
         try:
-            zip_path = create_plugin_zip(folder_path, folder_name)
+            zip_path = create_plugin_zip(
+                folder_path, folder_name,
+                default_license=default_license,
+            )
         except OSError as exc:
             print(f"  Error creating ZIP: {exc}")
             continue
@@ -834,7 +884,7 @@ def main():
     if action[0] == 0:
         deploy_local_flow(plugins, display)
     elif action[0] == 1:
-        upload_flow(plugins, display)
+        upload_flow(plugins, display, repo_root)
     else:
         prepare_upload_flow(plugins, display, repo_root)
 
