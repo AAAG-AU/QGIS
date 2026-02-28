@@ -159,3 +159,4 @@ coverage/
 agents/
 skills/
 .claude/
+.github/copilot-instructions.md
