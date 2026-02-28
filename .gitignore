@@ -152,4 +152,9 @@ coverage/
 # custom additions - always keep this section at the end of the file and retain
 # when updating or changing the .gitignore file.
 
-.claude/
+.claude/.github/copilot-instructions.md
+.github/instructions/
+.github/agents/
+.github/skills/
+agents/
+skills/
