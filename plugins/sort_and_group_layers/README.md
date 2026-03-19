@@ -73,6 +73,7 @@ submenus appear at the bottom:
 
 | Version | Changes |
 |---|---|
+| **1.0.4** | Removed deprecated supportsQt6 flag from metadata |
 | **1.0.3** | Fixed Layer menu detection for non-English QGIS locales |
 | **1.0.2** | Fixed Group by Folder Path not detecting file paths from SpatiaLite, delimited text, and other provider source URIs; added fallback raw source string parsing |
 | **1.0.1** | Fixed sort and group operations removing layers from the Layers panel; fixed Restore Original Order dropping layer connections and symbology |
