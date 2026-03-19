@@ -233,15 +233,13 @@ class SortAndGroupLayersPlugin:
     def _find_layer_menu(self):
         """Locate the Layer menu in the QGIS menu bar.
 
+        Uses the internal object name ``mLayerMenu`` so the lookup works
+        regardless of the QGIS UI language.
+
         Returns:
             QMenu or None if the Layer menu cannot be found.
         """
-        menu_bar = self.iface.mainWindow().menuBar()
-        for action in menu_bar.actions():
-            # Strip the '&' keyboard-accelerator prefix.
-            if action.text().replace("&", "") == "Layer":
-                return action.menu()
-        return None
+        return self.iface.mainWindow().findChild(QMenu, "mLayerMenu")
 
     # ------------------------------------------------------------------
     # Original order management
